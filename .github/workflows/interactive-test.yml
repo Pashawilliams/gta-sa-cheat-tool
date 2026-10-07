@@ -1,0 +1,38 @@
+name: Temporary interactive Grove Codes test
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: grove-interactive-test
+  cancel-in-progress: true
+jobs:
+  desktop-test:
+    runs-on: windows-2022
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Start protected test desktop
+        shell: pwsh
+        env:
+          DESKTOP_PASSWORD: ${{ secrets.DESKTOP_PASSWORD }}
+        run: ./scripts/test-desktop.ps1
+      - name: Save connection details without password
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-connection
+          path: desktop-connection/connection.json
+          retention-days: 1
+      - name: Interactive project testing window - maximum 30 minutes
+        shell: pwsh
+        run: |
+          Write-Host 'Test Grove Codes only. Cancel this run when finished. Desktop is automatically removed at the end.'
+          Start-Sleep -Seconds 1800
+      - name: Stop desktop services
+        if: always()
+        shell: pwsh
+        run: |
+          Stop-Process -Name cloudflared,python,GroveCodes -Force -ErrorAction SilentlyContinue
+          Stop-Service tvnserver -ErrorAction SilentlyContinue
