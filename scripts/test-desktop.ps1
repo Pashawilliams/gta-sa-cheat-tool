@@ -71,7 +71,7 @@ for ($i=0;$i -lt 30;$i++) {
   try { $response=Invoke-WebRequest 'http://127.0.0.1:6080/vnc.html' -TimeoutSec 2; if($response.StatusCode -eq 200){break} } catch { Start-Sleep -Seconds 1 }
 }
 if (-not $response -or $response.StatusCode -ne 200) { Get-Content proxy.err; throw 'noVNC HTTP endpoint not ready' }
-Start-Process "$work\cloudflared.exe" -ArgumentList @('tunnel','--url','http://127.0.0.1:6080','--no-autoupdate','--protocol','http2') -RedirectStandardOutput tunnel.out -RedirectStandardError tunnel.err | Out-Null
+$tunnelProcess = Start-Process "$work\cloudflared.exe" -PassThru -ArgumentList @('tunnel','--url','http://127.0.0.1:6080','--no-autoupdate','--protocol','http2') -RedirectStandardOutput tunnel.out -RedirectStandardError tunnel.err
 $url=$null
 for ($i=0;$i -lt 60;$i++) {
   Start-Sleep -Seconds 1
@@ -79,6 +79,13 @@ for ($i=0;$i -lt 60;$i++) {
   if ($text -match 'https://[a-z0-9-]+\.trycloudflare\.com') { $url=$Matches[0]; break }
 }
 if (-not $url) { Get-Content tunnel.err; throw 'No public tunnel URL was assigned' }
+$publicReady=$false
+for ($i=0;$i -lt 45;$i++) {
+  if ($tunnelProcess.HasExited) { Get-Content tunnel.err; throw "Tunnel exited: $($tunnelProcess.ExitCode)" }
+  try { $test=Invoke-WebRequest "$url/vnc.html" -TimeoutSec 5; if ($test.StatusCode -eq 200) {$publicReady=$true;break} } catch { Start-Sleep -Seconds 2 }
+}
+Get-Content tunnel.err
+if (-not $publicReady) { throw 'External tunnel HTTP check failed' }
 $browserUrl = "$url/vnc.html?autoconnect=true&resize=scale&shared=false"
 $evidence=Join-Path $env:GITHUB_WORKSPACE 'desktop-connection'
 New-Item -ItemType Directory -Force $evidence | Out-Null
