@@ -1,0 +1,119 @@
+name: Windows EXE verification
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows-check:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - name: Download exact release and verify SHA-256
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path evidence -Force | Out-Null
+          $url = 'https://github.com/Pashawilliams/gta-sa-cheat-tool/releases/download/v1.0.0/GroveCodes.exe'
+          Invoke-WebRequest $url -OutFile evidence/GroveCodes.exe
+          $hash = (Get-FileHash evidence/GroveCodes.exe -Algorithm SHA256).Hash.ToLower()
+          if ($hash -ne 'f235cfc575d0064701568f4c950a6133734dbe5632c2b1df1f26d3d418874efd') { throw 'Wrong binary hash' }
+          Get-ComputerInfo | Select-Object WindowsProductName,WindowsVersion,OsName,OsVersion,OsArchitecture | ConvertTo-Json | Out-File evidence/windows.json
+          Get-AuthenticodeSignature evidence/GroveCodes.exe | Select-Object Status,StatusMessage | ConvertTo-Json | Out-File evidence/signature.json
+          $hash | Out-File evidence/SHA256.txt
+      - name: Microsoft Defender scan
+        shell: pwsh
+        run: |
+          $result = @{ status = 'not_completed'; update = 'not_attempted' }
+          try {
+            $before = Get-MpComputerStatus -ErrorAction Stop
+            $before | Select-Object AMProductVersion,AMEngineVersion,AntivirusEnabled,AMServiceEnabled,AntivirusSignatureVersion,AntivirusSignatureLastUpdated,RealTimeProtectionEnabled | ConvertTo-Json | Out-File evidence/defender-before.json
+            if (-not $before.AntivirusEnabled -or -not $before.AMServiceEnabled) { throw 'Defender antivirus/service is not enabled on this runner' }
+            try { Update-MpSignature -ErrorAction Stop; $result.update = 'success' } catch { $result.update = $_.Exception.Message }
+            Get-MpComputerStatus | Select-Object AMProductVersion,AMEngineVersion,AntivirusEnabled,AntivirusSignatureVersion,AntivirusSignatureLastUpdated | ConvertTo-Json | Out-File evidence/defender-after.json
+            $scanner = Get-ChildItem "$env:ProgramData/Microsoft/Windows Defender/Platform/*/MpCmdRun.exe" -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
+            if (-not $scanner) { $scanner = "$env:ProgramFiles/Windows Defender/MpCmdRun.exe" }
+            $file = (Resolve-Path evidence/GroveCodes.exe).Path
+            & $scanner -Scan -ScanType 3 -File $file -DisableRemediation 2>&1 | Tee-Object evidence/defender-scan.txt
+            $code = $LASTEXITCODE
+            $result.exitCode = $code
+            if ($code -eq 0) { $result.status = 'scan_completed_no_detection_reported' } else { $result.status = 'scan_nonzero_requires_review' }
+            @(Get-MpThreatDetection -ErrorAction SilentlyContinue) | ConvertTo-Json -Depth 6 | Out-File evidence/defender-threats.json
+          } catch { $result.error = $_.Exception.Message }
+          $result | ConvertTo-Json | Tee-Object evidence/defender-result.json
+      - name: Launch and exercise real Windows GUI
+        shell: pwsh
+        run: |
+          Add-Type @'
+          using System;
+          using System.Text;
+          using System.Runtime.InteropServices;
+          public static class Native {
+            [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr h, int id);
+            [DllImport("user32.dll", CharSet=CharSet.Unicode, EntryPoint="SendMessageW")] public static extern IntPtr Send(IntPtr h, uint msg, IntPtr w, IntPtr l);
+            [DllImport("user32.dll", CharSet=CharSet.Unicode, EntryPoint="SendMessageW")] public static extern IntPtr Text(IntPtr h, uint msg, IntPtr w, string l);
+            [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+          }
+          '@
+          $result = [ordered]@{ status = 'running'; tests = @(); interactive = [Environment]::UserInteractive }
+          $p = $null
+          try {
+            $p = Start-Process (Resolve-Path evidence/GroveCodes.exe) -PassThru
+            if (-not $p.WaitForInputIdle(15000)) { throw 'Window did not become idle' }
+            Start-Sleep -Seconds 2
+            $p.Refresh()
+            if ($p.HasExited -or $p.MainWindowHandle -eq 0) { throw 'Application exited or has no main window' }
+            $h = $p.MainWindowHandle
+            if (-not [Native]::IsWindowVisible($h)) { throw 'Main window not visible' }
+            $result.tests += 'Executable launched and has visible native window'
+            $result.windowTitle = $p.MainWindowTitle
+            $list = [Native]::GetDlgItem($h,103)
+            $search = [Native]::GetDlgItem($h,101)
+            $count = [Native]::Send($list,0x018B,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32()
+            if ($count -ne 88) { throw "Expected 88 initial entries; got $count" }
+            $result.tests += 'Initial list contains 88 cheats'
+            [Native]::Text($search,0x000C,[IntPtr]::Zero,'HESOYAM') | Out-Null
+            $count = [Native]::Send($list,0x018B,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32()
+            if ($count -ne 1) { throw "Code search failed: $count results" }
+            $result.tests += 'HESOYAM search returns one result'
+            [Native]::Text($search,0x000C,[IntPtr]::Zero,'zzzznomatchzzzz') | Out-Null
+            if ([Native]::Send($list,0x018B,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ne 0) { throw 'Empty-results search failed' }
+            $result.tests += 'Unknown search returns zero results without crash'
+            [Native]::Text($search,0x000C,[IntPtr]::Zero,'HESOYAM') | Out-Null
+            [Native]::Send([Native]::GetDlgItem($h,106),0x00F5,[IntPtr]::Zero,[IntPtr]::Zero) | Out-Null
+            $settings = "$env:LOCALAPPDATA/GroveCodes/favorites.ini"
+            if (-not (Test-Path $settings)) { throw 'Favorites file not created' }
+            if ((Get-Content $settings -Raw) -notmatch 'HESOYAM=1') { throw 'Favorite not saved' }
+            $result.tests += 'Favorite button saves HESOYAM to local settings'
+            [Native]::Text($search,0x000C,[IntPtr]::Zero,'') | Out-Null
+            Start-Sleep -Milliseconds 500
+            try {
+              Add-Type -AssemblyName System.Windows.Forms
+              Add-Type -AssemblyName System.Drawing
+              $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+              $bmp = New-Object System.Drawing.Bitmap $bounds.Width,$bounds.Height
+              $graphics = [System.Drawing.Graphics]::FromImage($bmp)
+              $graphics.CopyFromScreen($bounds.Location,[System.Drawing.Point]::Empty,$bounds.Size)
+              $bmp.Save((Join-Path (Resolve-Path evidence).Path 'windows-desktop.png'))
+              $graphics.Dispose(); $bmp.Dispose()
+              $result.screenshot = 'windows-desktop.png; may be blank on noninteractive runners'
+            } catch { $result.screenshotError = $_.Exception.Message }
+            $p.CloseMainWindow() | Out-Null
+            if (-not $p.WaitForExit(5000)) { throw 'Application failed to close normally' }
+            if ($p.ExitCode -ne 0) { throw "Exit code $($p.ExitCode)" }
+            $result.tests += 'Normal close with exit code 0'
+            $result.status = 'passed'
+          } catch { $result.status = 'failed'; $result.error = $_.Exception.Message }
+          finally {
+            if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+            $result | ConvertTo-Json -Depth 6 | Tee-Object evidence/gui-result.json
+          }
+          if ($result.status -ne 'passed') { throw 'GUI test failed; inspect evidence' }
+      - name: Upload evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-verification-evidence
+          path: |
+            evidence/*.json
+            evidence/*.txt
+            evidence/*.png
+          retention-days: 30
