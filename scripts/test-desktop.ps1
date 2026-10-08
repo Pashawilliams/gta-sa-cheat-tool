@@ -64,14 +64,21 @@ $exe = Join-Path $desktop 'GroveCodes.exe'
 Invoke-WebRequest 'https://github.com/Pashawilliams/gta-sa-cheat-tool/releases/download/v1.0.0/GroveCodes.exe' -OutFile $exe
 if ((Get-FileHash $exe -Algorithm SHA256).Hash.ToLower() -ne 'f235cfc575d0064701568f4c950a6133734dbe5632c2b1df1f26d3d418874efd') { throw 'Unexpected Grove Codes binary' }
 'Temporary Grove Codes test desktop. Do not enter personal accounts or credentials. No GTA is installed. The session and files are deleted automatically. Close the GitHub Actions run to stop early.' | Set-Content (Join-Path $desktop 'READ-ME.txt')
-Start-Process $exe | Out-Null
+$interactive = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
+Register-ScheduledTask -TaskName 'GroveApplicationTest' -Action (New-ScheduledTaskAction -Execute $exe) -Principal $interactive -Force | Out-Null
+Start-ScheduledTask -TaskName 'GroveApplicationTest' 
 $python = (Get-Command python).Source
-Start-Process $python -ArgumentList @('-m','websockify','--web',"$work\noVNC-1.6.0",'127.0.0.1:6080','127.0.0.1:5900') -RedirectStandardOutput proxy.out -RedirectStandardError proxy.err | Out-Null
+$servicePrincipal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount
+$proxyArgs = "-m websockify --web `"$work\noVNC-1.6.0`" 127.0.0.1:6080 127.0.0.1:5900"
+Register-ScheduledTask -TaskName 'GroveWebsocketTest' -Action (New-ScheduledTaskAction -Execute $python -Argument $proxyArgs) -Principal $servicePrincipal -Force | Out-Null
+Start-ScheduledTask -TaskName 'GroveWebsocketTest' 
 for ($i=0;$i -lt 30;$i++) {
   try { $response=Invoke-WebRequest 'http://127.0.0.1:6080/vnc.html' -TimeoutSec 2; if($response.StatusCode -eq 200){break} } catch { Start-Sleep -Seconds 1 }
 }
 if (-not $response -or $response.StatusCode -ne 200) { Get-Content proxy.err; throw 'noVNC HTTP endpoint not ready' }
-$tunnelProcess = Start-Process "$work\cloudflared.exe" -PassThru -ArgumentList @('tunnel','--url','http://127.0.0.1:6080','--no-autoupdate','--protocol','http2') -RedirectStandardOutput tunnel.out -RedirectStandardError tunnel.err
+$tunnelArgs = "tunnel --url http://127.0.0.1:6080 --no-autoupdate --protocol http2 --logfile `"$work\tunnel.err`""
+Register-ScheduledTask -TaskName 'GroveTunnelTest' -Action (New-ScheduledTaskAction -Execute "$work\cloudflared.exe" -Argument $tunnelArgs) -Principal $servicePrincipal -Force | Out-Null
+Start-ScheduledTask -TaskName 'GroveTunnelTest' 
 $url=$null
 for ($i=0;$i -lt 60;$i++) {
   Start-Sleep -Seconds 1
@@ -81,7 +88,7 @@ for ($i=0;$i -lt 60;$i++) {
 if (-not $url) { Get-Content tunnel.err; throw 'No public tunnel URL was assigned' }
 $publicReady=$false
 for ($i=0;$i -lt 45;$i++) {
-  if ($tunnelProcess.HasExited) { Get-Content tunnel.err; throw "Tunnel exited: $($tunnelProcess.ExitCode)" }
+  if ((Get-ScheduledTask -TaskName 'GroveTunnelTest').State -ne 'Running') { Get-Content tunnel.err; throw 'Tunnel task exited' }
   try { $test=Invoke-WebRequest "$url/vnc.html" -TimeoutSec 5; if ($test.StatusCode -eq 200) {$publicReady=$true;break} } catch { Start-Sleep -Seconds 2 }
 }
 Get-Content tunnel.err
