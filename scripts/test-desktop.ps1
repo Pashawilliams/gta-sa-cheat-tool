@@ -98,4 +98,21 @@ $evidence=Join-Path $env:GITHUB_WORKSPACE 'desktop-connection'
 New-Item -ItemType Directory -Force $evidence | Out-Null
 @{url=$browserUrl; purpose='Single-user interactive testing of Grove Codes'; os='Windows Server 2022'; readyUtc=[DateTime]::UtcNow.ToString('o'); maximumSessionMinutes=30; password='Use the private DESKTOP_PASSWORD secret; never put it in the URL'} | ConvertTo-Json | Set-Content "$evidence\connection.json"
 "## Temporary Grove Codes test desktop`n`n[Open browser desktop]($browserUrl)`n`nRequires the private VNC password. Windows Server 2022; not Windows 10. Ends automatically after 30 minutes. Do not enter personal credentials. Cancel this workflow to stop immediately." | Out-File $env:GITHUB_STEP_SUMMARY -Append
+# Hide existing service consoles rather than terminating their processes.
+Add-Type @'
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+public static class TestDesktopWindows {
+ public delegate bool EnumProc(IntPtr h, IntPtr p);
+ [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc callback, IntPtr p);
+ [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder text, int max);
+ [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
+ public static void HideConsoles() {
+  EnumWindows((h,p) => {var s=new StringBuilder(256);GetClassName(h,s,256);if(s.ToString()=="ConsoleWindowClass" || s.ToString()=="CASCADIA_HOSTING_WINDOW_CLASS") ShowWindow(h,0);return true;},IntPtr.Zero);
+ }
+}
+'@
+(New-Object -ComObject Shell.Application).MinimizeAll()
+[TestDesktopWindows]::HideConsoles()
 Write-Host "GROVE_DESKTOP_URL=$browserUrl"
