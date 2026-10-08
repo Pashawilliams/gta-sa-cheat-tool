@@ -34,5 +34,6 @@ jobs:
         if: always()
         shell: pwsh
         run: |
+          'GroveTunnelTest','GroveWebsocketTest','GroveApplicationTest' | ForEach-Object { Stop-ScheduledTask -TaskName $_ -ErrorAction SilentlyContinue; Unregister-ScheduledTask -TaskName $_ -Confirm:$false -ErrorAction SilentlyContinue }
           Stop-Process -Name cloudflared,python,GroveCodes -Force -ErrorAction SilentlyContinue
           Stop-Service tvnserver -ErrorAction SilentlyContinue
